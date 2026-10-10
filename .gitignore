@@ -28,3 +28,21 @@ build/submission_*.tar.gz
 build/test_*.tar.gz
 build/test_*.txt
 *.log
+
+# Local-only exploratory sources and diagnostics. Public release scripts are
+# explicitly retained below; the rest remain available in the working tree.
+build/_*.py
+build/frontier_*
+docs/NEWARCH.md
+master_v4_simulation_audit.png
+rivals/_*.py
+rivals/schedules/
+shoprouter/
+shoprouter_main.py
+scripts/*.py
+!scripts/bench_panel.py
+!scripts/bench_v87.py
+!scripts/build_v87.py
+!scripts/build_v88.py
+!scripts/build_v89.py
+!scripts/submit_v89.py
