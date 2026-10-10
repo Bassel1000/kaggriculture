@@ -1,85 +1,68 @@
-# Kaggriculture Agent
+# Kaggriculture
 
-Agent for the **Kaggle Kaggriculture Simulation Competition** — a 2-player,
-720-turn farming economy simulation. Ships the current production agent plus
-the benchmark harness used to gate every version.
+> A production Kaggle agent for a two-player, 720-turn farming-economy simulation.
 
-**Current version: v87** (step shim).
+**Current release: v89** · **Submission entrypoint: [`main.py`](main.py)** · **License: Apache-2.0**
 
-## Layout
+Kaggriculture is a single-file competition agent backed by a replay-driven research workflow. The agent reads the live game state each turn, executes a schedule/economy policy, and adds narrowly-scoped safeguards where live evidence shows a real failure mode. The repository contains the current submission artifact, the release builders, a repeatable benchmark harness, and the forensic notes behind the most consequential decisions.
 
-```
-main.py                 the agent — this is the submission artifact
-bench_v87.json          recorded benchmark results for this version
-scripts/build_v87.py    delta builder + verification suite for v87
-scripts/bench_v87.py    the version's benchmark run
-scripts/bench_panel.py  shared match runner (loads the engine, runs both seats)
-rivals/                 opponent agents used as the regression panel
-docs/V87_FORENSICS.md   evidence behind this version's changes
-```
+## What is in this release
 
-`main.py` is the whole submission: the Kaggle archive is this single file
-renamed. It exposes three entrypoints — `agent`,
-`kaggle_submission_agent`, and `_kaggle_submission_entrypoint` — all bound to
-the same callable.
+v89 keeps the valuable part of v88: **full step normalization**. The Kaggle server can omit `observation["step"]` for seat 1, so v89 derives it exactly as `day * 24 + hour` before any policy layer runs. This prevents step-gated logic from silently being disabled on that seat.
 
-## Install
+It intentionally removes v88's automatic pasture ramp and restores the earlier expansion-space rule. Live replay analysis showed the ramp consuming otherwise scheduled worker actions while failing to eliminate stranded-animal outcomes; the tighter space gate also prevented expansion on deficit boards. The v89 builder documents the measurements and tests the change directly.
+
+## Quick start
 
 ```bash
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
+python -m py_compile main.py
+python scripts/build_v89.py
 ```
 
-## Benchmark
+`main.py` is the Kaggle submission source. It exports the three compatible entrypoints `agent`, `kaggle_submission_agent`, and `_kaggle_submission_entrypoint`, all pointing to the same v89 callable.
 
-```bash
-python scripts/bench_v87.py
+The builder regenerates `build/main_v89.py` from the exact v88 artifact and runs focused static and synthetic checks. Full head-to-head and panel runs are kept separate because they require the local competition engine and opponent fixtures.
+
+## Repository map
+
+```text
+main.py                   Current v89 submission artifact
+scripts/build_v89.py      Reproducible v89 delta builder and focused checks
+scripts/submit_v89.py     Optional Kaggle submission helper
+scripts/bench_panel.py    Shared two-seat match runner
+scripts/bench_v87.py      Previous release benchmark harness
+build/main_v88.py         Frozen parent artifact for the v89 builder
+docs/VERSION_HISTORY.md   Release-by-release progress and evidence
+docs/V87_FORENSICS.md     Replay evidence behind the v87/v88/v89 work
+rivals/                   Small, versioned benchmark opponents and fixtures
 ```
 
-Every pairing runs **both seats** and reports the seat-debiased mean. That
-matters: the local runner has a seat-interleaving bias on divergent agents, so
-single-seat numbers are not valid comparisons.
+Large replay collections, datasets, generated submission archives, local virtual environments, and the private experiment archive are deliberately ignored. They are useful for research but are neither required to inspect the release nor suitable for a public source repository.
 
-The `v87 vs v86` block is skipped automatically unless
-`build/main_v86.py` is present — the repo ships only the current artifact.
+## Validation philosophy
 
-### v87 results (8 seeds, both seats)
+Local score alone is not treated as proof. Each release is evaluated with:
 
-| Matchup | Record | Avg margin |
-|---|---|---|
-| vs Mirror (self) | 1-1-14 | $0 |
-| vs v86 (previous) | 1-1-14 | $0 |
-| vs C95 kernel | 8-0 | +$38,781 |
-| vs Sheep-spar | 8-0 | +$46,467 |
+- Both seats for each pairing, then a seat-debiased comparison.
+- Replay forensics to locate the first divergence and economic cause.
+- Targeted synthetic checks for the exact bug or behavior being changed.
+- Deterministic packaging and callable-entrypoint checks.
 
-## What v87 fixes
+Local benchmark outputs describe the tested fixtures; they are not a claim of current Kaggle leaderboard rank. See the version history for the distinction between local results and live observations.
 
-The episode spec declares `observation["step"]` as `"shared": true`, but the
-server withholds it from the **seat-1** agent. Measured across 5,760 recorded
-observations from 8 live replays: seat 0 has the field 5760/5760, seat 1 has it
-**0/5760**. Not intermittent.
+## Release progress
 
-Because every step-gated feature read `step` and defaulted to `0`, the whole
-stack ran dead all game on seat 1 — `_v85_expand` (window 48-600),
-`_v86_dump` (648-719), `_v83_rescue` (step < 670). Live cost on submission
-`56648082`, 20 games:
+| Release | Focus | Outcome |
+| --- | --- | --- |
+| v72 | Portfolio/schedule frontier | Established a strong schedule-based baseline and exact local mirror behavior. |
+| v85–v86 | Expansion and terminal economics | Added quantity-matching expansion and terminal fertilizer handling. |
+| v87 | Seat-1 step bug | Detected that the server withheld `step` for seat 1; added an initial compatibility shim. |
+| v88 | Full normalization + pasture ramp | Normalized `step` at the true entrypoint; live results rejected the added ramp. |
+| **v89** | Keep the fix, remove the regression | Retains normalization while disabling the ramp and restoring the loose expansion gate. |
 
-```
-seat 0 (features live)  13 games  10-3   +$25,663/game
-seat 1 (features dead)   7 games   4-3      +$169/game
-```
+For the detailed timeline, methodology, measurements, and release rationale, read [`docs/VERSION_HISTORY.md`](docs/VERSION_HISTORY.md).
 
-Local benches never caught it because the harness supplies `step` to both
-seats, so every paired A/B exercised the live path on both sides.
+## Attribution and license
 
-The fix prefers the real `obs["step"]`, else derives `day * 24 + hour`, which
-reproduces the step index exactly — verified on 8,640 real observations with
-mean error `+0.00`. Seat 0 is bit-identical; no other logic changed.
-
-## License
-
-Apache-2.0 — see `LICENSE.txt`. The agent carries upstream attribution
-notices for Apache-2.0 derivations (thomastschinkel, yhay81, tetsutani,
-prvsiyan, destbreso, aurax7, Dmitrii Gluzdov, Ahmed Berat Ozer and others);
-those notices are preserved inline in `main.py`.
-
-Private repository. Not for redistribution.
+The agent is an Apache-2.0 derivative that preserves the relevant upstream attribution notices inline in [`main.py`](main.py). See [`LICENSE.txt`](LICENSE.txt) for the full license text. This repository is published so the current artifact and the reasoning around it can be audited; please preserve the notices when redistributing derivatives.

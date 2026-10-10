@@ -1,3 +1,5 @@
+# v89: pasture ramp OFF + space gate reverted to v87 loose; step normalization kept. See scripts/build_v89.py.
+# v88: full step normalization at the entrypoint + pasture ramp; supersedes v87/v87b/v87c. See scripts/build_v88.py.
 # v87: step shim -- the server withholds `step` from the seat-1 agent, which silently disabled every step-gated feature; see scripts/build_v87.py.
 # v86: tomato gate loosened (shops<2-><1, price 76->72) + terminal fert dump; see scripts/build_v86.py.
 # v85: financed quantity-matching expansion wrapper; see scripts/build_v85.py.
@@ -7957,6 +7959,11 @@ def _v85_totals(obs):
 
 
 def _v85_space(my):
+    """v89: REVERTED to the v87 original. Bare dirt counts as capacity: the
+    native schedule builds pens then places same-day and the v82 fixers
+    repair shed takes, so dirt today is a pen tomorrow. The v88 tight gate
+    blocked expansion buys on exactly the deficit boards where quantity
+    matters (live: still stranded AND fell behind)."""
     try:
         for row in my.get("tiles", []) or []:
             for tile in row or []:
@@ -8142,3 +8149,225 @@ def _v87_entrypoint(observation, configuration=None):
 agent = _v87_entrypoint
 kaggle_submission_agent = _v87_entrypoint
 _kaggle_submission_entrypoint = _v87_entrypoint
+
+
+# ============================================================================
+# v88 -- FULL STEP NORMALIZATION + PASTURE RAMP (see scripts/build_v88.py)
+#
+# Finding #1: the server withholds observation["step"] from seat 1. The v87
+# shim fixed only three late-layer helpers; the shipped artifact still has
+# 174 direct obs["step"] index sites and 5 .get("step", 0) sites that stay
+# dead (or KeyError-caught) all game on seat 1. Fix: inject the exact step
+# (day*24+hour, verified error +0.00) into the observation at the TRUE
+# entrypoint before any parent layer runs. Superset of the v87 shim.
+#
+# Finding #2: animals are unsellable and PLACE only accepts a free
+# PASTURE/COOP tile, but BUILD_PASTURE is FREE. _v85_space is fixed above;
+# here idle hands (action already ["PASS"], zero opportunity cost by
+# construction) walk to owned bare land and build pens so expansion buys
+# have somewhere to live. Fires when herd deficit vs the biggest rival >= 2,
+# steps 48..648, max 2 hands/step, max 24 builds/game, cap 40 structures.
+# ============================================================================
+_V88_ON = True
+_V88_STEP_LO = 48
+_V88_STEP_HI = 648
+_V88_DIFF = 2
+_V88_MAX_HANDS_PER_STEP = 2
+_V88_BUILDS_PER_GAME = 24
+_V88_STRUCT_CAP = 40
+_V88_REPORT = {"builds": 0, "normalized": 0}
+
+
+def _v88_normalize(obs):
+    """Return obs with a valid 'step' key (mutates dict obs in place; the
+    environment rebuilds observations every step)."""
+    try:
+        if isinstance(obs, dict):
+            raw = obs.get("step")
+            ok = False
+            try:
+                ok = raw is not None and int(raw) >= 0
+            except (TypeError, ValueError):
+                ok = False
+            if not ok:
+                day = int(obs.get("day", 0) or 0)
+                hour = int(obs.get("hour", 0) or 0)
+                obs["step"] = day * 24 + hour
+                _V88_REPORT["normalized"] += 1
+            return obs
+    except Exception:
+        pass
+    return obs
+
+
+def _v88_tiles(farm):
+    try:
+        return farm.get("tiles", []) or []
+    except AttributeError:
+        return []
+
+
+def _v88_owned(farm):
+    try:
+        return set(farm.get("unlocked_quadrants", []) or [])
+    except (TypeError, AttributeError):
+        return set()
+
+
+def _v88_quadrant(x, y):
+    if x < 5 and y < 5:
+        return "NW"
+    if x >= 5 and y < 5:
+        return "NE"
+    if x < 5 and y >= 5:
+        return "SW"
+    return "SE"
+
+
+def _v88_bare(farm):
+    owned = _v88_owned(farm)
+    out = []
+    for y, row in enumerate(_v88_tiles(farm)):
+        for x, tile in enumerate(row or []):
+            if tile is None and _v88_quadrant(x, y) in owned:
+                out.append((x, y))
+    return out
+
+
+def _v88_struct_count(farm):
+    n = 0
+    for row in _v88_tiles(farm):
+        for tile in row or []:
+            if isinstance(tile, dict) and tile.get("kind") in ("PASTURE", "COOP"):
+                n += 1
+    return n
+
+
+def _v88_walk(pos, target):
+    cmds = []
+    x, y = int(pos[0]), int(pos[1])
+    tx, ty = int(target[0]), int(target[1])
+    while x != tx:
+        if x < tx:
+            cmds.append(["EAST"]); x += 1
+        else:
+            cmds.append(["WEST"]); x -= 1
+    while y != ty:
+        if y < ty:
+            cmds.append(["SOUTH"]); y += 1
+        else:
+            cmds.append(["NORTH"]); y -= 1
+    return cmds
+
+
+def _v88_pick(farm, used):
+    cands = [t for t in _v88_bare(farm) if t not in used]
+    if not cands:
+        return None
+    tiles = _v88_tiles(farm)
+
+    def score(t):
+        x, y = t
+        near = 0
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            try:
+                tile = tiles[y + dy][x + dx]
+            except (IndexError, TypeError):
+                tile = None
+            if isinstance(tile, dict) and tile.get("kind") in ("PASTURE", "COOP"):
+                near += 1
+        return (-near, abs(x - 4) + abs(y - 4), x, y)
+
+    return min(cands, key=score)
+
+
+def _v88_pasture(action, obs):
+    if not (_V88_ON and _V89_PASTURE_ON):
+        return action
+    step = _v85_step(obs)
+    if step < _V88_STEP_LO or step > _V88_STEP_HI:
+        return action
+    diff, seat, my = _v85_totals(obs)
+    # EXACTLY the same gate as _v85_expand (diff >= _V88_DIFF == _V85_DIFF),
+    # so pens are only built when a buy is actually pending. Mirror equity:
+    # with equal herds neither layer ever fires.
+    if diff < _V88_DIFF or not my:
+        return action
+    if _v88_struct_count(my) >= _V88_STRUCT_CAP:
+        return action
+    st = _V88_STATE.setdefault(seat, {"targets": {}, "built": 0})
+    if st["built"] >= _V88_BUILDS_PER_GAME:
+        return action
+    try:
+        units = [list(action.get("farmer") or ["PASS"])] + [
+            list(h or ["PASS"]) for h in (action.get("hands") or [])]
+    except AttributeError:
+        return action
+    try:
+        farm_units = _v83_units(my)
+    except Exception:
+        farm_units = []
+    changed = 0
+    for ui in range(1, len(units)):
+        if ui >= len(farm_units):
+            break
+        if units[ui] != ["PASS"]:
+            continue                      # zero opportunity cost, by design
+        tgt = st["targets"].get(ui)
+        if tgt is None:
+            tgt = _v88_pick(my, set(st["targets"].values()))
+            if tgt is None:
+                break
+            st["targets"][ui] = tuple(tgt)
+        if tuple(farm_units[ui]) == tuple(tgt):
+            units[ui] = ["BUILD_PASTURE"]
+            del st["targets"][ui]
+            st["built"] += 1
+            _V88_REPORT["builds"] += 1
+        else:
+            units[ui] = _v88_walk(farm_units[ui], tgt)[0]
+        changed += 1
+        if changed >= _V88_MAX_HANDS_PER_STEP:
+            break
+    if changed:
+        action["farmer"] = units[0]
+        action["hands"] = units[1:]
+    return action
+
+
+_V88_PARENT = agent
+_V88_STATE = {}
+
+
+def _v88_entrypoint(observation, configuration=None):
+    observation = _v88_normalize(observation)
+    action = _V88_PARENT(observation, configuration)
+    try:
+        action = _v88_pasture(action, observation)
+    except Exception:
+        pass
+    return action
+
+
+agent = _v88_entrypoint
+kaggle_submission_agent = _v88_entrypoint
+_kaggle_submission_entrypoint = _v88_entrypoint
+
+
+# ============================================================================
+# v89 -- RAMP OFF, SPACE GATE REVERTED, NORMALIZATION KEPT
+# (see scripts/build_v89.py). v88 live regressed (blowouts 5.2% vs 2.5%,
+# last30 -3.3k/game vs -0.4k; stranded animals persisted while the ramp
+# burned 27-30 PASS-hand builds/game; pre-ship pasture ablation -$55k).
+# The step normalizer is the verified-good half of v88 (seat-1 bleed fix)
+# and stays ON: _v88_normalize does not consult any flag.
+# ============================================================================
+_V89_PASTURE_ON = False
+
+_V89_PARENT = _v88_entrypoint
+_v89_entrypoint = _v88_entrypoint
+
+
+agent = _v89_entrypoint
+kaggle_submission_agent = _v89_entrypoint
+_kaggle_submission_entrypoint = _v89_entrypoint

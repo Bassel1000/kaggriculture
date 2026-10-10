@@ -1,1 +1,30 @@
-(empty)
+# Python and local tooling
+__pycache__/
+*.py[cod]
+.venv/
+.kilo/
+
+# Kaggle credentials, generated packages, and large local datasets
+.kaggle/
+kaggriculture-data/
+replays/
+rivals/replays*/
+rivals/episodes/
+rivals/decoded_payloads/
+rivals/boatlee/
+actions.json
+receipt.json
+*.tar.gz
+*.zip
+
+# Historical experiments are retained locally; the version history documents
+# the release decisions without publishing the bulky working archive.
+Archive/
+
+# Generated build products and scratch files
+build/__pycache__/
+build/main_v*.py
+build/submission_*.tar.gz
+build/test_*.tar.gz
+build/test_*.txt
+*.log
